@@ -8,7 +8,7 @@ license = "MIT"
 repository = "https://github.com/SauersML/reference_verifier"
 
 [dependencies]
-clap = "4.5"
-indicatif = "0.17"
-reqwest = { version = "0.11", features = ["blocking"] }
+clap = { version = "4.5.31", features = ["derive"] }
+indicatif = "0.17.11"
+reqwest = { version = "0.11.27", features = ["blocking"] }
 tempfile = "3.17.1"
