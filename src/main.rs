@@ -77,7 +77,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    // 2) reference FASTA is downloaded
+    // 2) Make sure reference FASTA is downloaded
     check_file(HG19_FA, HG19_URL);
     check_file(HG38_FA, HG38_URL);
 
@@ -139,7 +139,7 @@ fn main() {
     // Temp files auto-cleaned when 'split_dir' goes out of scope.
 }
 
-/// `dest_path` exists locally; if not, download from `url` with a progress bar.
+/// Make sure that `dest_path` exists locally; if not, download from `url` with a progress bar.
 fn check_file(dest_path: &str, url: &str) {
     if Path::new(dest_path).exists() {
         println!("{} already exists, skipping download.", dest_path);
