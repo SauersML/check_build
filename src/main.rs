@@ -2,44 +2,72 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use reqwest::blocking::Client;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::path::Path;
-use tempfile::NamedTempFile;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use tempfile::tempdir;
 
 /// URLs for uncompressed FASTA files
 const HG19_URL: &str = "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa";
 const HG38_URL: &str = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa";
 
-/// Names for the downloaded FASTA files
+/// Local filenames for references
 const HG19_FA: &str = "hg19.fa";
 const HG38_FA: &str = "hg38.fa";
-
-/// Holds the start offset and length of each chromosome in our flattened file.
-#[derive(Debug)]
-struct ChromOffset {
-    start: u64,
-    length: u64,
-}
-
-/// Mapping: chromosome name -> ChromOffset
-type ChromMap = HashMap<String, ChromOffset>;
 
 #[derive(Parser, Debug)]
 #[command(
     author,
     version,
-    about = "Verifies a plain-text .vcf (no gz) against both hg19 and hg38 with minimal memory usage."
+    about = "Verifies a plain-text .vcf (no gz) against both hg19 and hg38 in a streaming manner without large memory usage."
 )]
 struct Args {
     /// Path to a non-gzipped VCF file.
     vcf: String,
 }
 
+/// This struct tracks the current contig name/sequence and global verification counters.
+/// By using a struct, we avoid multiple mutable borrows to the same data.
+struct ContigState {
+    current_contig: String,
+    current_seq: Vec<u8>,
+    lines_checked: u64,
+    mismatches: u64,
+}
+
+impl ContigState {
+    fn new() -> Self {
+        ContigState {
+            current_contig: String::new(),
+            current_seq: Vec::new(),
+            lines_checked: 0,
+            mismatches: 0,
+        }
+    }
+
+    /// Flushes the current contig by verifying it against the splitted VCF lines, then clears name/sequence.
+    fn flush_contig(&mut self, contig_file_map: &HashMap<String, PathBuf>) {
+        if self.current_contig.is_empty() {
+            return;
+        }
+        let cnt = verify_contig(
+            &self.current_contig,
+            &self.current_seq,
+            contig_file_map,
+            &mut self.mismatches,
+        );
+        self.lines_checked += cnt;
+
+        // Reset
+        self.current_contig.clear();
+        self.current_seq.clear();
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
-    // 1) Validate the input is a plain-text .vcf file.
+    // 1) Validate VCF input
     if !args.vcf.ends_with(".vcf") {
         eprintln!("ERROR: Only accepts a .vcf file (not .gz).");
         std::process::exit(1);
@@ -49,74 +77,69 @@ fn main() {
         std::process::exit(1);
     }
 
-    // 2) check FASTA files are downloaded.
+    // 2) reference FASTA is downloaded
     check_file(HG19_FA, HG19_URL);
     check_file(HG38_FA, HG38_URL);
 
-    // 3) Flatten each FASTA to a temporary file and build an offset map.
-    println!("Flattening and indexing {}...", HG19_FA);
-    let (hg19_flat, hg19_map) = match flatten_fasta(HG19_FA, "hg19") {
-        Ok(val) => val,
+    // 3) Split the VCF into per-contig files (in a temp directory),
+    //    so we can retrieve lines for each contig on demand with minimal memory usage.
+    println!("Splitting VCF by contig into temporary files...");
+    let split_dir = match tempdir() {
+        Ok(d) => d,
         Err(e) => {
-            eprintln!("ERROR flattening {}: {}", HG19_FA, e);
+            eprintln!("ERROR creating temp dir for splitted VCF: {}", e);
             std::process::exit(1);
         }
     };
-
-    println!("Flattening and indexing {}...", HG38_FA);
-    let (hg38_flat, hg38_map) = match flatten_fasta(HG38_FA, "hg38") {
-        Ok(val) => val,
+    let contig_file_map = match split_vcf_by_contig(&args.vcf, &split_dir) {
+        Ok(map) => map,
         Err(e) => {
-            eprintln!("ERROR flattening {}: {}", HG38_FA, e);
+            eprintln!("ERROR splitting VCF: {}", e);
             std::process::exit(1);
         }
     };
+    println!(
+        "VCF split complete. Found {} contigs in the VCF.",
+        contig_file_map.len()
+    );
 
-    // 4) Count the number of non-header records in the VCF for progress display.
-    println!("Counting records in VCF {}...", args.vcf);
-    let total_vcf_records = match count_vcf_records(&args.vcf) {
-        Ok(count) => count,
-        Err(e) => {
-            eprintln!("ERROR counting VCF lines: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // 5) Verify the VCF against each reference.
+    // 4) Verify the VCF against each reference (hg19 & hg38) using streaming.
     println!("\n===================");
-    println!("Verifying against hg19:");
-    let (lines_hg19, mismatches_hg19) =
-        verify_vcf(&hg19_flat, &hg19_map, &args.vcf, total_vcf_records, "hg19");
+    println!("Verifying against hg19 (streaming)...");
+    let (lines_hg19, mismatches_hg19) = verify_reference_streaming(HG19_FA, &contig_file_map);
     println!("Finished checking hg19.");
     println!("Lines processed: {}", lines_hg19);
     println!("Mismatches: {}", mismatches_hg19);
 
     println!("\n===================");
-    println!("Verifying against hg38:");
-    let (lines_hg38, mismatches_hg38) =
-        verify_vcf(&hg38_flat, &hg38_map, &args.vcf, total_vcf_records, "hg38");
+    println!("Verifying against hg38 (streaming)...");
+    let (lines_hg38, mismatches_hg38) = verify_reference_streaming(HG38_FA, &contig_file_map);
     println!("Finished checking hg38.");
     println!("Lines processed: {}", lines_hg38);
     println!("Mismatches: {}", mismatches_hg38);
 
-    // 6) Final summary and comparison.
+    // 5) Final summary
     println!("\n===================");
     println!("Verification Summary:");
-    println!("  - hg19 => {} lines, {} mismatches", lines_hg19, mismatches_hg19);
-    println!("  - hg38 => {} lines, {} mismatches", lines_hg38, mismatches_hg38);
+    println!(
+        "  - hg19 => {} lines, {} mismatches",
+        lines_hg19, mismatches_hg19
+    );
+    println!(
+        "  - hg38 => {} lines, {} mismatches",
+        lines_hg38, mismatches_hg38
+    );
     if mismatches_hg19 + mismatches_hg38 == 0 {
         println!("All checks passed (no mismatches on either reference).");
     } else {
         println!("Some mismatches occurred. See details above.");
-    }
-
-    // Temporary files are cleaned up automatically.
-    if mismatches_hg19 + mismatches_hg38 > 0 {
         std::process::exit(1);
     }
+
+    // Temp files auto-cleaned when 'split_dir' goes out of scope.
 }
 
-///  that `dest_path` exists locally; if not, downloads it from `url` with a progress bar.
+/// `dest_path` exists locally; if not, download from `url` with a progress bar.
 fn check_file(dest_path: &str, url: &str) {
     if Path::new(dest_path).exists() {
         println!("{} already exists, skipping download.", dest_path);
@@ -130,7 +153,8 @@ fn check_file(dest_path: &str, url: &str) {
     }
 }
 
-/// Downloads `url` to `dest_path` using a blocking reqwest call with an indicatif progress bar.
+/// Download `url` to `dest_path` using reqwest + indicatif progress bar.
+/// We read in larger chunks, only updating the progress bar after each chunk.
 fn download_file(url: &str, dest_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
     let mut response = client.get(url).send()?;
@@ -140,14 +164,16 @@ fn download_file(url: &str, dest_path: &str) -> Result<(), Box<dyn std::error::E
     let total_size = response
         .content_length()
         .ok_or_else(|| "Could not get Content-Length from server.".to_string())?;
+
     let pb = ProgressBar::new(total_size);
     pb.set_draw_target(ProgressDrawTarget::stderr());
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{msg} [{bar:40.cyan-blue}] {bytes} of {total_bytes} bytes ({eta})")
-            .progress_chars("=>-")
+            .progress_chars("=>-"),
     );
     pb.set_message(format!("Downloading {}", dest_path));
+
     let mut out_file = File::create(dest_path)?;
     let mut downloaded = 0u64;
     let mut buffer = [0u8; 8192];
@@ -164,204 +190,274 @@ fn download_file(url: &str, dest_path: &str) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// Reads a FASTA file line-by-line, removes newlines, and writes the raw bases to a temporary flattened file.
-/// It also builds an in-memory map of chromosome offsets. Sequences are stored in uppercase.
-fn flatten_fasta(
-    fasta_path: &str,
-    tag: &str,
-) -> Result<(NamedTempFile, ChromMap), Box<dyn std::error::Error>> {
-    let fasta_in = File::open(fasta_path)?;
-    let mut reader = BufReader::new(fasta_in);
-    let mut flat_file = NamedTempFile::new()?;
-    let mut chrom_map: ChromMap = HashMap::new();
-    let mut current_chrom = String::new();
-    let mut current_chrom_start = 0u64;
-    let mut current_chrom_len = 0u64;
-    let mut line_buf = String::new();
-    let mut total_bytes_written = 0u64;
-    let fasta_size = std::fs::metadata(fasta_path)
-        .ok()
-        .map(|m| m.len())
-        .unwrap_or(0);
-    let pb = ProgressBar::new(fasta_size);
-    pb.set_draw_target(ProgressDrawTarget::stderr());
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template(&format!(
-                "Flattening {} {{spinner}} [{{bar:40.cyan-blue}}] {{bytes}} of {{total_bytes}} bytes ({{eta}})",
-                tag
-            )),
-    );
-    pb.set_message(format!("Flattening {}", fasta_path));
-    loop {
-        let bytes_read = reader.read_line(&mut line_buf)?;
-        if bytes_read == 0 {
-            if !current_chrom.is_empty() {
-                chrom_map.insert(
-                    current_chrom.clone(),
-                    ChromOffset {
-                        start: current_chrom_start,
-                        length: current_chrom_len,
-                    },
-                );
-            }
-            break;
-        }
-        pb.inc(bytes_read as u64);
-        if line_buf.starts_with('>') {
-            if !current_chrom.is_empty() {
-                chrom_map.insert(
-                    current_chrom.clone(),
-                    ChromOffset {
-                        start: current_chrom_start,
-                        length: current_chrom_len,
-                    },
-                );
-            }
-            current_chrom.clear();
-            current_chrom_start = total_bytes_written;
-            current_chrom_len = 0;
-            let header = line_buf
-                .trim_start_matches('>')
-                .split_whitespace()
-                .next()
-                .unwrap_or("");
-            current_chrom.push_str(header);
-        } else {
-            let seq_line = line_buf.trim_end();
-            let seq_line_upper = seq_line.to_uppercase();
-            flat_file.write_all(seq_line_upper.as_bytes())?;
-            let len_written = seq_line_upper.len() as u64;
-            total_bytes_written += len_written;
-            current_chrom_len += len_written;
-        }
-        line_buf.clear();
-    }
-    pb.finish_with_message(format!("Flattened {} into temporary file", fasta_path));
-    Ok((flat_file, chrom_map))
-}
+/// Splits all VCF lines (non-header) by contig into separate temporary files,
+/// stored in `split_dir`. Returns a map contig -> PathBuf (temp file location).
+///
+/// Memory usage is minimal: we stream line by line. If the VCF is large,
+/// we never hold more than one line in memory at a time.
+fn split_vcf_by_contig(
+    vcf_path: &str,
+    split_dir: &tempfile::TempDir,
+) -> Result<HashMap<String, PathBuf>, Box<dyn std::error::Error>> {
+    let f = File::open(vcf_path)?;
+    let reader = BufReader::new(f);
 
-/// Quickly counts the number of data lines (non-header) in the VCF.
-fn count_vcf_records(vcf_path: &str) -> Result<u64, Box<dyn std::error::Error>> {
-    let file = File::open(vcf_path)?;
-    let reader = BufReader::new(file);
-    let mut count = 0u64;
+    let mut handles: HashMap<String, File> = HashMap::new();
+    let mut file_paths: HashMap<String, PathBuf> = HashMap::new();
+
     for line_res in reader.lines() {
         let line = line_res?;
-        if !line.starts_with('#') && !line.trim().is_empty() {
-            count += 1;
+        if line.starts_with('#') || line.trim().is_empty() {
+            // skip headers / empties
+            continue;
+        }
+        // columns: contig, pos, ...
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.is_empty() {
+            continue;
+        }
+        let contig = cols[0].to_string();
+
+        // If not already have a file for this contig, open/create one
+        if !handles.contains_key(&contig) {
+            let contig_file = split_dir.path().join(format!("{}.tmp", contig));
+            let f = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .write(true)
+                .open(&contig_file)?;
+            handles.insert(contig.clone(), f);
+            file_paths.insert(contig.clone(), contig_file);
+        }
+        // Write this line to the contig's file
+        if let Some(h) = handles.get_mut(&contig) {
+            writeln!(h, "{}", line)?;
         }
     }
-    Ok(count)
+
+    Ok(file_paths)
 }
 
-/// Opens the flattened FASTA file, streams through the VCF, and checks that each REF allele matches
-/// the corresponding substring from the reference (using the chromosome offset map). A progress bar is shown.
-fn verify_vcf(
-    flat_fasta: &NamedTempFile,
-    chrom_map: &ChromMap,
-    vcf_path: &str,
-    total_lines: u64,
-    label: &str,
+/// Streams the given reference FASTA contig by contig, verifying the splitted VCF lines for each.
+fn verify_reference_streaming(
+    fasta_path: &str,
+    contig_file_map: &HashMap<String, PathBuf>,
 ) -> (u64, u64) {
-    let mut flat_reader = File::open(flat_fasta.path())
-        .unwrap_or_else(|_| panic!("ERROR: Could not open flattened file for {}.", label));
-    let pb = ProgressBar::new(total_lines);
+    // We'll parse the FASTA in chunked reads, building lines, then detect contigs with '>'.
+    // We'll keep track in a struct `ContigState`.
+
+    let meta = match std::fs::metadata(fasta_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("ERROR reading metadata for {}: {}", fasta_path, e);
+            return (0, 0);
+        }
+    };
+    let total_len = meta.len();
+
+    let pb = ProgressBar::new(total_len);
     pb.set_draw_target(ProgressDrawTarget::stderr());
     pb.set_style(
         ProgressStyle::default_bar()
             .template(&format!(
-                "{}: Checking VCF records {{spinner}} [{{bar:40.cyan-blue}}] {{pos}} of {{len}} ({{eta}})",
-                label
-            )),
+                "Streaming reference {} {{spinner}} [{{bar:40.cyan-blue}}] {{bytes}} of {{total_bytes}} ({{eta}})",
+                fasta_path
+            ))
+            .progress_chars("=>-"),
     );
-    pb.set_message(format!("Verifying {} vs {}", vcf_path, label));
-    let file = File::open(vcf_path)
-        .unwrap_or_else(|_| panic!("ERROR: Could not open VCF file: {}", vcf_path));
-    let reader = BufReader::new(file);
-    let mut lineno = 0u64;
-    let mut mismatches = 0u64;
+
+    // Open FASTA
+    let f = match File::open(fasta_path) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("ERROR opening {}: {}", fasta_path, e);
+            return (0, 0);
+        }
+    };
+    let mut reader = BufReader::new(f);
+
+    let mut chunk = [0u8; 65536]; // 64 KB
+    let mut read_bytes = 0u64;
+
+    let mut line_buf = Vec::<u8>::new();
+    let mut state = ContigState::new();
+
+    // Read in chunks, gather lines ourselves
+    loop {
+        let n = match reader.read(&mut chunk) {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("ERROR reading {}: {}", fasta_path, e);
+                break;
+            }
+        };
+        if n == 0 {
+            // EOF
+            break;
+        }
+        read_bytes += n as u64;
+        pb.set_position(read_bytes);
+
+        let slice = &chunk[..n];
+        for &b in slice {
+            if b == b'\n' || b == b'\r' {
+                // We've hit a line boundary
+                process_fasta_line(&mut state, &mut line_buf, contig_file_map);
+                line_buf.clear();
+            } else {
+                line_buf.push(b);
+            }
+        }
+    }
+    // Process leftover line
+    if !line_buf.is_empty() {
+        process_fasta_line(&mut state, &mut line_buf, contig_file_map);
+        line_buf.clear();
+    }
+    // Flush final contig
+    state.flush_contig(contig_file_map);
+
+    pb.finish_with_message(format!("Done streaming {}.", fasta_path));
+    (state.lines_checked, state.mismatches)
+}
+
+/// Process one line from the FASTA. If it starts with '>', it's a new contig. Otherwise, sequence data.
+fn process_fasta_line(
+    state: &mut ContigState,
+    line_buf: &mut Vec<u8>,
+    contig_file_map: &HashMap<String, PathBuf>,
+) {
+    if line_buf.is_empty() {
+        return;
+    }
+    if line_buf[0] == b'>' {
+        // We have a new contig
+        // Flush the old one
+        state.flush_contig(contig_file_map);
+
+        // Parse contig name
+        let line_str = String::from_utf8_lossy(&line_buf[1..]).to_string();
+        let header = line_str.split_whitespace().next().unwrap_or("").to_string();
+        state.current_contig = header;
+    } else {
+        // Sequence line => uppercase + append
+        for b in line_buf.iter_mut() {
+            b.make_ascii_uppercase();
+        }
+        state.current_seq.extend_from_slice(line_buf);
+    }
+}
+
+/// Verifies splitted VCF lines for `contig` against the in-memory `seq`.
+/// Updates `mismatch_count` in place, returns how many lines processed for that contig.
+fn verify_contig(
+    contig: &str,
+    seq: &[u8],
+    contig_file_map: &HashMap<String, PathBuf>,
+    mismatch_count: &mut u64,
+) -> u64 {
+    // The VCF might reference contig as "chrXYZ", "XYZ", etc.
+    let candidates = [
+        contig.to_string(),
+        contig.trim_start_matches("chr").to_string(),
+        format!("chr{}", contig),
+    ];
+    let mut lines_checked = 0;
+
+    // Find splitted file path
+    let mut file_path_opt = None;
+    for c in &candidates {
+        if let Some(p) = contig_file_map.get(c) {
+            file_path_opt = Some(p);
+            break;
+        }
+    }
+
+    let contig_file = match file_path_opt {
+        Some(p) => p,
+        None => {
+            // no lines for this contig
+            return 0;
+        }
+    };
+
+    let f = match File::open(contig_file) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!(
+                "WARNING: Could not open splitted VCF file for contig {}: {}",
+                contig, e
+            );
+            return 0;
+        }
+    };
+    let reader = BufReader::new(f);
+
     for line_res in reader.lines() {
         let line = match line_res {
             Ok(x) => x,
             Err(e) => {
-                eprintln!("Error reading VCF line {}: {}", lineno, e);
+                eprintln!(
+                    "WARNING: Error reading splitted line for contig {}: {}",
+                    contig, e
+                );
                 break;
             }
         };
-        lineno += 1;
-        if line.starts_with('#') {
-            continue;
-        }
-        pb.inc(1);
+        lines_checked += 1;
+
         let cols: Vec<&str> = line.split('\t').collect();
         if cols.len() < 4 {
-            eprintln!("WARNING: Malformed line {}: {}", lineno, line);
+            eprintln!("WARNING: Malformed line in splitted file: {}", line);
             continue;
         }
-        let chrom = cols[0];
         let pos_str = cols[1];
         let ref_allele = cols[3];
+
         let pos_1based = match pos_str.parse::<u64>() {
             Ok(p) => p,
             Err(_) => {
-                eprintln!("WARNING: Invalid position on line {}: {}", lineno, line);
+                eprintln!("WARNING: Invalid position in splitted file line: {}", line);
                 continue;
             }
         };
         let pos_0based = pos_1based.saturating_sub(1);
-        let (start, length) = if let Some(offset) = chrom_map.get(chrom) {
-            (offset.start, offset.length)
-        } else {
-            if chrom.starts_with("chr") {
-                let alt = chrom.trim_start_matches("chr");
-                if let Some(off) = chrom_map.get(alt) {
-                    (off.start, off.length)
-                } else {
-                    eprintln!("WARNING: Chrom {} not found in FASTA (line {})", chrom, lineno);
-                    continue;
-                }
-            } else {
-                let alt = format!("chr{}", chrom);
-                if let Some(off) = chrom_map.get(&alt) {
-                    (off.start, off.length)
-                } else {
-                    eprintln!("WARNING: Chrom {} not found in FASTA (line {})", chrom, lineno);
-                    continue;
-                }
-            }
-        };
         let end_pos = pos_0based + ref_allele.len() as u64;
-        if end_pos > length {
+        if end_pos > seq.len() as u64 {
             eprintln!(
-                "WARNING: Out-of-bounds for chrom {} at line {} (pos={}, ref_len={}, chrom_len={})",
-                chrom, lineno, pos_1based, ref_allele.len(), length
+                "WARNING: Out-of-bounds: contig={}, pos={}, ref_len={}, seq_len={}",
+                contig,
+                pos_1based,
+                ref_allele.len(),
+                seq.len()
             );
             continue;
         }
-        let absolute_offset = start + pos_0based;
-        if let Err(e) = flat_reader.seek(SeekFrom::Start(absolute_offset)) {
-            eprintln!("ERROR seeking in flattened FASTA at line {}: {}", lineno, e);
-            break;
-        }
-        let mut buffer = vec![0u8; ref_allele.len()];
-        if let Err(e) = flat_reader.read_exact(&mut buffer) {
-            eprintln!("ERROR reading substring at line {}: {}", lineno, e);
-            break;
-        }
-        let extracted_str = String::from_utf8_lossy(&buffer);
-        if !equals_ignore_case(&extracted_str, ref_allele) {
+
+        let slice = &seq[pos_0based as usize..end_pos as usize];
+        if !equals_ignore_case(slice, ref_allele.as_bytes()) {
             eprintln!(
-                "Mismatch line {}:\n  Chrom: {} Pos: {} REF='{}'\n  FASTA => '{}'\n",
-                lineno, chrom, pos_str, ref_allele, extracted_str
+                "Mismatch:\n  Contig: {} Pos: {} REF='{}'\n  FASTA => '{}'\n",
+                contig,
+                pos_str,
+                ref_allele,
+                String::from_utf8_lossy(slice)
             );
-            mismatches += 1;
+            *mismatch_count += 1;
         }
     }
-    pb.finish_with_message(format!("Done checking {}", label));
-    (lineno, mismatches)
+    lines_checked
 }
 
-fn equals_ignore_case(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.eq_ignore_ascii_case(b)
+/// Compare two byte slices ignoring ASCII case (length must match).
+fn equals_ignore_case(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for (x, y) in a.iter().zip(b) {
+        if x.to_ascii_uppercase() != y.to_ascii_uppercase() {
+            return false;
+        }
+    }
+    true
 }
