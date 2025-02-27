@@ -170,6 +170,7 @@ fn download_file(url: &str, dest_path: &str) -> Result<(), Box<dyn std::error::E
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{msg} [{bar:40.cyan-blue}] {bytes} of {total_bytes} bytes ({eta})")
+            .expect("Failed to set template for progress bar")
             .progress_chars("=>-"),
     );
     pb.set_message(format!("Downloading {}", dest_path));
@@ -263,6 +264,7 @@ fn verify_reference_streaming(
                 "Streaming reference {} {{spinner}} [{{bar:40.cyan-blue}}] {{bytes}} of {{total_bytes}} ({{eta}})",
                 fasta_path
             ))
+            .expect("Failed to set template for streaming progress bar")
             .progress_chars("=>-"),
     );
 
