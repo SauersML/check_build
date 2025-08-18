@@ -1,4 +1,5 @@
 use clap::Parser;
+use flate2::read::GzDecoder;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use reqwest::blocking::Client;
 use std::collections::HashMap;
@@ -140,6 +141,7 @@ fn main() {
 }
 
 /// Make sure that `dest_path` exists locally; if not, download from `url` with a progress bar.
+/// If the downloaded file appears to be gzipped, it will be decompressed in place.
 fn check_file(dest_path: &str, url: &str) {
     if Path::new(dest_path).exists() {
         println!("{} already exists, skipping download.", dest_path);
@@ -150,6 +152,32 @@ fn check_file(dest_path: &str, url: &str) {
             std::process::exit(1);
         }
         println!("Download complete: {}", dest_path);
+
+        // Sniff for gzip magic bytes (1F 8B) and decompress if found.
+        let mut file = match File::open(dest_path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("ERROR opening downloaded file {}: {}", dest_path, e);
+                std::process::exit(1);
+            }
+        };
+
+        let mut buffer = [0; 2];
+        match file.read_exact(&mut buffer) {
+            Ok(()) => {
+                if buffer == [0x1f, 0x8b] {
+                    // This is a gzipped file, so decompress it.
+                    if let Err(e) = decompress_gzip_in_place(dest_path) {
+                        eprintln!("ERROR decompressing {}: {}", dest_path, e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Err(_) => {
+                // Could not read 2 bytes, so it's not a valid gzip file.
+                // We can just ignore this case and assume it's not gzipped.
+            }
+        }
     }
 }
 
@@ -188,6 +216,26 @@ fn download_file(url: &str, dest_path: &str) -> Result<(), Box<dyn std::error::E
         pb.set_position(downloaded);
     }
     pb.finish_with_message(format!("Downloaded {}", dest_path));
+    Ok(())
+}
+
+/// Decompresses a gzipped file in place, overwriting the original.
+fn decompress_gzip_in_place(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Decompressing {} in place...", path);
+
+    // Read the entire compressed file into memory.
+    let compressed_bytes = std::fs::read(path)?;
+
+    // Decompress the data using a GzDecoder.
+    let mut decoder = GzDecoder::new(&compressed_bytes[..]);
+    let mut decompressed_bytes = Vec::new();
+    decoder.read_to_end(&mut decompressed_bytes)?;
+
+    // Overwrite the original file with the decompressed data.
+    let mut file = File::create(path)?;
+    file.write_all(&decompressed_bytes)?;
+
+    println!("{} has been decompressed.", path);
     Ok(())
 }
 
