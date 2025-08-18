@@ -1,6 +1,6 @@
 [package]
 name = "check_build"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["SauersML"]
 edition = "2021"
 description = "A tool to verify a VCF file against hg19 and hg38 references using a streaming, low-memory approach."
