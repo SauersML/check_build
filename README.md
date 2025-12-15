@@ -1,24 +1,29 @@
 # check_build
 
-`check_build` is a command-line tool written in Rust that verifies a plain-text (non-gzipped) VCF file against two reference genomes (hg19 and hg38) using a streaming, low-memory approach. It compares the REF alleles in your VCF with the corresponding bases in the reference FASTA files while only loading one contig at a time.
+A fast, memory-efficient tool to verify VCF files against hg19 and hg38 reference genomes.
 
-## Features
+## Quick Start
 
-- **Streaming Verification:** Reads large reference FASTA files in chunks to avoid high memory usage.
-- **VCF Splitting:** Splits the VCF file by contig into temporary files so that only relevant records are processed at a time.
-- **Automatic Download:** Automatically downloads reference FASTA files (if not present locally).
-- **Dual Reference Comparison:** Verifies VCF records against both hg19 and hg38, helping you determine which build the VCF is aligned to.
-- **Minimal Dependencies:** Uses `clap` for argument parsing, `indicatif` for progress indication, `reqwest` for HTTP downloads, and `tempfile` for managing temporary files.
+**What build is my file?**
+
+```bash
+check_build --detect my_variants.vcf
+# Output: Hg38 (100.0% match, high confidence)
+```
+
+**Full verification:**
+
+```bash
+check_build my_variants.vcf
+```
 
 ## Installation
-
-Install via Cargo:
 
 ```bash
 cargo install check_build
 ```
 
-Alternatively, clone the repository and build from source:
+Or from source:
 
 ```bash
 git clone https://github.com/SauersML/check_build.git
@@ -28,30 +33,100 @@ cargo build --release
 
 ## Usage
 
-`check_build` expects a plain-text VCF file (non-gzipped). To run the tool, simply execute:
+### CLI
 
 ```bash
-check_build genome.vcf
+# Simple build detection
+check_build --detect sample.vcf
+
+# Full verification with summary
+check_build sample.vcf
+
+# Quiet mode (no progress bars)
+check_build -q sample.vcf
+
+# Summary only (no mismatch details)
+check_build -s sample.vcf
+
+# Single reference
+check_build --hg38-only sample.vcf
+
+# Custom reference paths
+check_build --hg19-path /data/hg19.fa --hg38-path /data/hg38.fa sample.vcf
 ```
 
-During execution, the tool will:
-1. Check for the existence of the `hg19.fa` and `hg38.fa` files in the working directory. If not found, it downloads them automatically.
-2. Split the VCF file into temporary files by contig.
-3. Stream each reference FASTA file contig-by-contig and verify each VCF record by comparing its REF allele with the corresponding reference bases.
-4. Print a final summary with the total number of lines processed and mismatches for each reference.
+### Library
 
-### Example Output
+Add to `Cargo.toml`:
 
-```
-Verification Summary:
-  - hg19 => 4357415 lines, 3298348 mismatches
-  - hg38 => 4728611 lines, 0 mismatches
+```toml
+[dependencies]
+check_build = { git = "https://github.com/SauersML/check_build" }
 ```
 
-This indicates that the VCF records match hg38 perfectly. If a large number of records mismatch (or are out-of-bounds) on hg19, but are aligned well to hg38, it suggests the VCF is aligned to hg38.
+**Simple usage:**
+
+```rust
+use check_build::detect_build;
+
+let result = detect_build("sample.vcf")?;
+println!("{}", result);  // "Hg38 (100.0% match, high confidence)"
+```
+
+**Full control:**
+
+```rust
+use check_build::{Verifier, Reference};
+
+let result = Verifier::new("sample.vcf")
+    .quiet()
+    .verify_both()?;
+
+println!("hg19: {:.1}% match", result.match_rate(Reference::Hg19));
+println!("hg38: {:.1}% match", result.match_rate(Reference::Hg38));
+
+// Detailed detection with edge case handling
+match result.detect() {
+    BuildDetection::Detected { build, confidence, .. } => {
+        println!("Build: {:?} ({} confidence)", build, confidence);
+    }
+    BuildDetection::Ambiguous { reason, .. } => {
+        println!("Cannot determine: {}", reason);
+    }
+    BuildDetection::Unknown { reason, .. } => {
+        println!("Problem with file: {}", reason);
+    }
+    BuildDetection::NoData => {
+        println!("No valid variants found");
+    }
+}
+```
+
+## Features
+
+- **Fast**: Parallel verification of hg19/hg38 using rayon
+- **Memory-efficient**: Streams references, processes one contig at a time
+- **Auto-download**: Fetches reference FASTAs if not present
+- **Edge case handling**: Detects ambiguous, unknown, or corrupt files
+- **Dual interface**: Both CLI and library
 
 ## How It Works
 
-- **VCF Splitting:** The VCF file is streamed line-by-line and split into temporary files for each contig. This minimizes memory usage since only one line is processed at a time.
-- **Streaming Reference Verification:** Instead of loading the entire reference genome into memory, the FASTA file is read in 64 KB chunks. Contigs are processed sequentially so that only the sequence for the current contig is held in memory. Once a contig is processed (i.e. when a new contig header is encountered), the corresponding VCF records are verified, and the memory is cleared before moving to the next contig.
-- **Mismatch Reporting:** If a VCF line references a genomic position that is out-of-bounds (or if the REF allele does not match the reference), a warning is printed (a lot of these are expected). The final summary shows the total number of mismatches per reference build.
+1. Splits VCF by contig into temp files
+2. Streams each reference FASTA (never loads full genome)
+3. Verifies REF alleles match reference bases
+4. Reports match rates and infers build
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0    | Success (build detected or verification passed) |
+| 1    | Error (file not found, download failed, etc.) |
+| 2    | Ambiguous (matches both builds similarly) |
+| 3    | Unknown (low match on both, possibly corrupt) |
+| 4    | No data (VCF had no valid variants) |
+
+## License
+
+MIT

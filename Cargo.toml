@@ -1,15 +1,29 @@
 [package]
 name = "check_build"
-version = "0.1.1"
+version = "0.2.0"
 authors = ["SauersML"]
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 description = "A tool to verify a VCF file against hg19 and hg38 references using a streaming, low-memory approach."
 license = "MIT"
 repository = "https://github.com/SauersML/check_build"
 
+[lib]
+name = "check_build"
+path = "src/lib.rs"
+
+[[bin]]
+name = "check_build"
+path = "src/main.rs"
+
 [dependencies]
-clap = { version = "4.5.45", features = ["derive"] }
-indicatif = "0.17.11"
-reqwest = { version = "0.11.27", features = ["blocking"] }
-tempfile = "3.20.0"
+clap = { version = "4.5", features = ["derive"] }
+indicatif = "0.17"
+reqwest = { version = "0.12", features = ["blocking"] }
+tempfile = "3.20"
 flate2 = "1.1"
+rayon = "1.10"
+memchr = "2.7"
+
+[dev-dependencies]
+tempfile = "3.20"
