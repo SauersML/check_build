@@ -509,10 +509,7 @@ fn download_file(url: &str, dest_path: &str, show_progress: bool) -> Result<(), 
         .map_err(|e| VerifyError::Download(e.to_string()))?;
 
     if !response.status().is_success() {
-        return Err(VerifyError::Download(format!(
-            "HTTP {}",
-            response.status()
-        )));
+        return Err(VerifyError::Download(format!("HTTP {}", response.status())));
     }
 
     let total_size = response.content_length();
@@ -561,7 +558,9 @@ fn decompress_gzip_in_place(path: &str) -> Result<(), VerifyError> {
     let compressed = std::fs::read(path)?;
     let mut decoder = GzDecoder::new(&compressed[..]);
     let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed).map_err(VerifyError::Io)?;
+    decoder
+        .read_to_end(&mut decompressed)
+        .map_err(VerifyError::Io)?;
 
     let file = File::create(path)?;
     let mut writer = BufWriter::with_capacity(DOWNLOAD_BUFFER_SIZE, file);
@@ -713,7 +712,13 @@ fn verify_reference_streaming(
         if let Some(ref pb) = pb {
             pb.set_position(read_bytes);
         }
-        process_chunk(&mut state, &mut line_buf, &chunk[..n], contig_file_map, verbose);
+        process_chunk(
+            &mut state,
+            &mut line_buf,
+            &chunk[..n],
+            contig_file_map,
+            verbose,
+        );
     }
 
     if !line_buf.is_empty() {
@@ -792,9 +797,7 @@ pub fn verify_contig(
     verbose: bool,
 ) -> u64 {
     let candidates = get_contig_candidates(contig);
-    let file_path = candidates
-        .iter()
-        .find_map(|c| contig_file_map.get(c));
+    let file_path = candidates.iter().find_map(|c| contig_file_map.get(c));
 
     let contig_file = match file_path {
         Some(p) => p,
@@ -839,7 +842,10 @@ pub fn verify_contig(
             if verbose {
                 eprintln!(
                     "WARNING: Out-of-bounds: {}:{} ref_len={} seq_len={}",
-                    contig, pos_1based, ref_allele.len(), seq.len()
+                    contig,
+                    pos_1based,
+                    ref_allele.len(),
+                    seq.len()
                 );
             }
             continue;
@@ -850,7 +856,10 @@ pub fn verify_contig(
             if verbose {
                 eprintln!(
                     "Mismatch: {}:{} REF='{}' FASTA='{}'",
-                    contig, pos_str, ref_allele, String::from_utf8_lossy(slice)
+                    contig,
+                    pos_str,
+                    ref_allele,
+                    String::from_utf8_lossy(slice)
                 );
             }
             *mismatch_count += 1;

@@ -1,4 +1,4 @@
-use check_build::{detect_build, Reference, Verifier};
+use check_build::{Reference, Verifier, detect_build};
 use clap::Parser;
 use std::path::Path;
 
