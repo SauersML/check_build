@@ -488,9 +488,7 @@ pub fn get_contig_candidates(contig: &str) -> Vec<String> {
 #[inline]
 pub fn equals_ignore_case(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x.to_ascii_uppercase() == y.to_ascii_uppercase())
+        && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y))
 }
 
 // ============================================================================
@@ -609,7 +607,6 @@ pub fn split_vcf_by_contig(
             let f = OpenOptions::new()
                 .create(true)
                 .append(true)
-                .write(true)
                 .open(&contig_file)?;
             handles.insert(contig_owned.clone(), BufWriter::with_capacity(65536, f));
             file_paths.insert(contig_owned.clone(), contig_file);
@@ -700,11 +697,7 @@ fn verify_reference_streaming(
     let mut line_buf = Vec::<u8>::with_capacity(1024);
     let mut state = ContigState::new();
 
-    loop {
-        let n = match reader.read(&mut chunk) {
-            Ok(x) => x,
-            Err(_) => break,
-        };
+    while let Ok(n) = reader.read(&mut chunk) {
         if n == 0 {
             break;
         }
@@ -769,7 +762,7 @@ fn process_chunk(
 
 fn process_line(
     state: &mut ContigState,
-    line_buf: &mut Vec<u8>,
+    line_buf: &mut [u8],
     contig_file_map: &HashMap<String, PathBuf>,
     verbose: bool,
 ) {
