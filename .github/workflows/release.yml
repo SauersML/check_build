@@ -12,6 +12,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 permissions:
   contents: write
@@ -49,29 +50,47 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # MacOS ARM (Apple Silicon) - M1 runner
+          # MacOS ARM (Apple Silicon) - GH Actions uses M1
           - os: macos-14
             target: aarch64-apple-darwin
             artifact_name: check_build
             asset_name: check_build-macos-arm64
+            cpu: apple-m1
 
           # MacOS Intel
-          - os: macos-13
+          - os: macos-15
             target: x86_64-apple-darwin
             artifact_name: check_build
             asset_name: check_build-macos-intel
+            cpu: x86-64-v3
 
-          # Linux x86_64
+          # Linux x86_64 (ubuntu-22.04 for wider glibc compatibility)
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact_name: check_build
             asset_name: check_build-linux-x64
+            cpu: x86-64-v3
+
+          # Linux ARM64
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact_name: check_build
+            asset_name: check_build-linux-arm64
+            cpu: neoverse-n1
 
           # Windows x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: check_build.exe
             asset_name: check_build-windows-x64
+            cpu: x86-64-v3
+
+          # Windows ARM64 (native ARM runner)
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact_name: check_build.exe
+            asset_name: check_build-windows-arm64
+            cpu: cortex-a76
 
     steps:
       - uses: actions/checkout@v4
@@ -86,8 +105,14 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Remove local cargo config
+        shell: bash
+        run: rm -f .cargo/config.toml
+
       - name: Build
         shell: bash
+        env:
+          RUSTFLAGS: "-C target-cpu=${{ matrix.cpu }}"
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package (Unix)
@@ -111,7 +136,7 @@ jobs:
           path: |
             ${{ matrix.asset_name }}.tar.gz
             ${{ matrix.asset_name }}.zip
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   release:
     name: Create Release
@@ -128,7 +153,7 @@ jobs:
           path: artifacts
 
       - name: Display structure of downloaded files
-        run: ls -R artifacts || echo "No artifacts"
+        run: ls -R artifacts
 
       - name: Generate release tag
         id: tag
@@ -140,19 +165,3 @@ jobs:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           name: Release ${{ steps.tag.outputs.release_tag }}
           files: artifacts/**/*
-          body: |
-            ## check_build Release
-
-            Automated release of check_build VCF verification tool.
-
-            ### Binaries
-            - `check_build-macos-arm64.tar.gz` - macOS Apple Silicon (M1/M2/M3)
-            - `check_build-macos-intel.tar.gz` - macOS Intel
-            - `check_build-linux-x64.tar.gz` - Linux x86_64
-            - `check_build-windows-x64.zip` - Windows x64
-
-            ### Library Usage
-            ```toml
-            [dependencies]
-            check_build = { git = "https://github.com/SauersML/check_build" }
-            ```
