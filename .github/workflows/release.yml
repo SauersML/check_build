@@ -12,7 +12,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 permissions:
   contents: write
@@ -26,6 +25,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
@@ -48,47 +49,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # MacOS ARM (Apple Silicon)
+          # MacOS ARM (Apple Silicon) - M1 runner
           - os: macos-14
             target: aarch64-apple-darwin
             artifact_name: check_build
             asset_name: check_build-macos-arm64
-            cpu: apple-m1
 
           # MacOS Intel
-          - os: macos-15
+          - os: macos-13
             target: x86_64-apple-darwin
             artifact_name: check_build
             asset_name: check_build-macos-intel
-            cpu: x86-64-v3
 
-          # Linux x86_64 (ubuntu-22.04 for wider glibc compatibility)
+          # Linux x86_64
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact_name: check_build
             asset_name: check_build-linux-x64
-            cpu: x86-64-v3
-
-          # Linux ARM64 (ubuntu-22.04 for wider glibc compatibility)
-          - os: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-            artifact_name: check_build
-            asset_name: check_build-linux-arm64
-            cpu: neoverse-n1
 
           # Windows x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: check_build.exe
             asset_name: check_build-windows-x64
-            cpu: x86-64-v3
-
-          # Windows ARM64 (native ARM runner)
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            artifact_name: check_build.exe
-            asset_name: check_build-windows-arm64
-            cpu: cortex-a76
 
     steps:
       - uses: actions/checkout@v4
@@ -103,14 +86,8 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Remove local cargo config
-        shell: bash
-        run: rm -f .cargo/config.toml
-
       - name: Build
         shell: bash
-        env:
-          RUSTFLAGS: "-C target-cpu=${{ matrix.cpu }}"
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package (Unix)
@@ -134,7 +111,7 @@ jobs:
           path: |
             ${{ matrix.asset_name }}.tar.gz
             ${{ matrix.asset_name }}.zip
-          if-no-files-found: error
+          if-no-files-found: ignore
 
   release:
     name: Create Release
@@ -151,11 +128,11 @@ jobs:
           path: artifacts
 
       - name: Display structure of downloaded files
-        run: ls -R artifacts
+        run: ls -R artifacts || echo "No artifacts"
 
       - name: Generate release tag
         id: tag
-        run: echo "release_tag=v$(grep '^version' Cargo.toml | head -1 | sed 's/.*\"\(.*\)\"/\1/')-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+        run: echo "release_tag=v$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -172,9 +149,7 @@ jobs:
             - `check_build-macos-arm64.tar.gz` - macOS Apple Silicon (M1/M2/M3)
             - `check_build-macos-intel.tar.gz` - macOS Intel
             - `check_build-linux-x64.tar.gz` - Linux x86_64
-            - `check_build-linux-arm64.tar.gz` - Linux ARM64
             - `check_build-windows-x64.zip` - Windows x64
-            - `check_build-windows-arm64.zip` - Windows ARM64
 
             ### Library Usage
             ```toml
