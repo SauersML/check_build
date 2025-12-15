@@ -487,8 +487,7 @@ pub fn get_contig_candidates(contig: &str) -> Vec<String> {
 /// Compare byte slices ignoring ASCII case
 #[inline]
 pub fn equals_ignore_case(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len()
-        && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y))
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y))
 }
 
 // ============================================================================
