@@ -69,10 +69,10 @@ pub const HG19_URL: &str = "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZ
 /// URL for hg38 reference FASTA
 pub const HG38_URL: &str = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz";
 
-/// MD5 Checksum for hg19 reference FASTA (gzipped)
-pub const HG19_MD5: &str = "806c02398f5ac5da8ffd6da2d1d5d1a9";
-/// MD5 Checksum for hg38 reference FASTA (gzipped)
-pub const HG38_MD5: &str = "1c9dcaddfa41027f17cd8f7a82c7293b";
+/// URL for hg19 md5sum.txt
+pub const HG19_MD5_URL: &str = "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/md5sum.txt";
+/// URL for hg38 md5sum.txt  
+pub const HG38_MD5_URL: &str = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/md5sum.txt";
 
 /// Default local filename for hg19
 pub const HG19_DEFAULT_PATH: &str = "hg19.fa.gz";
@@ -109,11 +109,11 @@ impl Reference {
         }
     }
 
-    /// Get the expected MD5 checksum for this reference
-    pub fn md5(&self) -> &'static str {
+    /// Get the URL for the md5sum.txt file containing checksums for this reference
+    pub fn md5_url(&self) -> &'static str {
         match self {
-            Reference::Hg19 => HG19_MD5,
-            Reference::Hg38 => HG38_MD5,
+            Reference::Hg19 => HG19_MD5_URL,
+            Reference::Hg38 => HG38_MD5_URL,
         }
     }
 
@@ -284,7 +284,10 @@ pub fn detect_build_from_positions(positions: &[Variant]) -> Result<BuildResult,
 /// Helper to detect if a VCF/variant set matches a specific reference path
 ///
 /// Returns the match rate (0.0 to 100.0) against the provided reference.
-pub fn detect_build_with_ref(vcf_path: impl Into<String>, ref_path: impl Into<String>) -> Result<f64, VerifyError> {
+pub fn detect_build_with_ref(
+    vcf_path: impl Into<String>,
+    ref_path: impl Into<String>,
+) -> Result<f64, VerifyError> {
     let ref_path = ref_path.into();
     // Dummy reference enum for verify_single, but we override path
     let r = Verifier::new(vcf_path)
@@ -373,8 +376,8 @@ impl Verifier {
             variants: None,
             hg19_path: hg19,
             hg38_path: hg38,
-            hg19_md5: Some(Reference::Hg19.md5().to_string()),
-            hg38_md5: Some(Reference::Hg38.md5().to_string()),
+            hg19_md5: None, // Fetched dynamically from UCSC
+            hg38_md5: None, // Fetched dynamically from UCSC
             show_progress: true,
             verbose: true,
             auto_download: true,
@@ -389,8 +392,8 @@ impl Verifier {
             variants: Some(variants),
             hg19_path: hg19,
             hg38_path: hg38,
-            hg19_md5: Some(Reference::Hg19.md5().to_string()),
-            hg38_md5: Some(Reference::Hg38.md5().to_string()),
+            hg19_md5: None, // Fetched dynamically from UCSC
+            hg38_md5: None, // Fetched dynamically from UCSC
             show_progress: true,
             verbose: true,
             auto_download: true,
@@ -402,8 +405,14 @@ impl Verifier {
             .unwrap_or_else(|| std::env::current_dir().unwrap())
             .join("check_build");
 
-        let hg19 = cache_dir.join(HG19_DEFAULT_PATH).to_string_lossy().into_owned();
-        let hg38 = cache_dir.join(HG38_DEFAULT_PATH).to_string_lossy().into_owned();
+        let hg19 = cache_dir
+            .join(HG19_DEFAULT_PATH)
+            .to_string_lossy()
+            .into_owned();
+        let hg38 = cache_dir
+            .join(HG38_DEFAULT_PATH)
+            .to_string_lossy()
+            .into_owned();
         (hg19, hg38)
     }
 
@@ -532,13 +541,10 @@ impl Verifier {
                 ));
             }
             if !Path::new(path).exists() {
-                return Err(VerifyError::InvalidVcf(format!(
-                    "File not found: {}",
-                    path
-                )));
+                return Err(VerifyError::InvalidVcf(format!("File not found: {}", path)));
             }
         } else if self.variants.is_none() {
-             return Err(VerifyError::InvalidVcf(
+            return Err(VerifyError::InvalidVcf(
                 "No VCF path or variants provided".to_string(),
             ));
         }
@@ -547,8 +553,26 @@ impl Verifier {
 
     fn ensure_references(&self) -> Result<(), VerifyError> {
         if self.auto_download {
-            ensure_reference(&self.hg19_path, HG19_URL, self.hg19_md5.as_deref(), self.show_progress)?;
-            ensure_reference(&self.hg38_path, HG38_URL, self.hg38_md5.as_deref(), self.show_progress)?;
+            // Fetch MD5 dynamically from UCSC if not provided
+            let hg19_md5 = self.hg19_md5.clone().or_else(|| {
+                fetch_md5_for_file(HG19_MD5_URL, HG19_DEFAULT_PATH, self.show_progress).ok()
+            });
+            let hg38_md5 = self.hg38_md5.clone().or_else(|| {
+                fetch_md5_for_file(HG38_MD5_URL, HG38_DEFAULT_PATH, self.show_progress).ok()
+            });
+
+            ensure_reference(
+                &self.hg19_path,
+                HG19_URL,
+                hg19_md5.as_deref(),
+                self.show_progress,
+            )?;
+            ensure_reference(
+                &self.hg38_path,
+                HG38_URL,
+                hg38_md5.as_deref(),
+                self.show_progress,
+            )?;
         } else {
             if !Path::new(&self.hg19_path).exists() {
                 return Err(VerifyError::ReferenceNotFound(self.hg19_path.clone()));
@@ -566,7 +590,12 @@ impl Verifier {
 // ============================================================================
 
 /// Ensure a reference file exists, downloading if necessary
-pub fn ensure_reference(path: &str, url: &str, expected_md5: Option<&str>, show_progress: bool) -> Result<(), VerifyError> {
+pub fn ensure_reference(
+    path: &str,
+    url: &str,
+    expected_md5: Option<&str>,
+    show_progress: bool,
+) -> Result<(), VerifyError> {
     if let Some(parent) = Path::new(path).parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -613,6 +642,50 @@ fn check_md5(path: &str, expected: &str) -> Result<bool, VerifyError> {
     let result = hasher.finalize();
     let result_str = format!("{:x}", result);
     Ok(result_str == expected)
+}
+
+/// Fetch MD5 checksum for a specific file from a UCSC md5sum.txt URL
+fn fetch_md5_for_file(
+    md5_url: &str,
+    filename: &str,
+    show_progress: bool,
+) -> Result<String, VerifyError> {
+    if show_progress {
+        eprintln!("Fetching MD5 checksum from {}...", md5_url);
+    }
+
+    let client = Client::new();
+    let response = client
+        .get(md5_url)
+        .send()
+        .map_err(|e| VerifyError::Download(e.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(VerifyError::Download(format!(
+            "Failed to fetch md5sum.txt: HTTP {}",
+            response.status()
+        )));
+    }
+
+    let body = response
+        .text()
+        .map_err(|e| VerifyError::Download(e.to_string()))?;
+
+    // Parse md5sum.txt format: "checksum  filename"
+    for line in body.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 && parts[1] == filename {
+            if show_progress {
+                eprintln!("Found MD5 for {}: {}", filename, parts[0]);
+            }
+            return Ok(parts[0].to_string());
+        }
+    }
+
+    Err(VerifyError::Download(format!(
+        "MD5 for {} not found in {}",
+        filename, md5_url
+    )))
 }
 
 /// Generate contig name candidates for flexible matching
@@ -715,7 +788,9 @@ pub fn split_vcf_by_contig(
 
         let mut parts = line.split('\t');
         let contig = parts.next()?;
-        if contig.is_empty() { return None; }
+        if contig.is_empty() {
+            return None;
+        }
 
         let pos_str = parts.next()?;
         let _id = parts.next();
@@ -842,11 +917,14 @@ fn verify_reference_streaming(
             let _ = f.seek(std::io::SeekFrom::Start(0));
 
             if is_gzip {
-                Box::new(BufReader::with_capacity(FASTA_READ_BUFFER_SIZE, GzDecoder::new(f)))
+                Box::new(BufReader::with_capacity(
+                    FASTA_READ_BUFFER_SIZE,
+                    GzDecoder::new(f),
+                ))
             } else {
                 Box::new(BufReader::with_capacity(FASTA_READ_BUFFER_SIZE, f))
             }
-        },
+        }
         Err(_) => return (0, 0),
     };
 
