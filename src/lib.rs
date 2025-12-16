@@ -55,7 +55,7 @@ use rayon::prelude::*;
 use reqwest::blocking::Client;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -65,14 +65,19 @@ use tempfile::TempDir;
 // ============================================================================
 
 /// URL for hg19 reference FASTA
-pub const HG19_URL: &str = "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa";
+pub const HG19_URL: &str = "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/bigZips/hg19.fa.gz";
 /// URL for hg38 reference FASTA
-pub const HG38_URL: &str = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa";
+pub const HG38_URL: &str = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz";
+
+/// MD5 Checksum for hg19 reference FASTA (gzipped)
+pub const HG19_MD5: &str = "806c02398f5ac5da8ffd6da2d1d5d1a9";
+/// MD5 Checksum for hg38 reference FASTA (gzipped)
+pub const HG38_MD5: &str = "1c9dcaddfa41027f17cd8f7a82c7293b";
 
 /// Default local filename for hg19
-pub const HG19_DEFAULT_PATH: &str = "hg19.fa";
+pub const HG19_DEFAULT_PATH: &str = "hg19.fa.gz";
 /// Default local filename for hg38
-pub const HG38_DEFAULT_PATH: &str = "hg38.fa";
+pub const HG38_DEFAULT_PATH: &str = "hg38.fa.gz";
 
 // ============================================================================
 // Internal Constants
@@ -104,6 +109,14 @@ impl Reference {
         }
     }
 
+    /// Get the expected MD5 checksum for this reference
+    pub fn md5(&self) -> &'static str {
+        match self {
+            Reference::Hg19 => HG19_MD5,
+            Reference::Hg38 => HG38_MD5,
+        }
+    }
+
     /// Get the default local filename for this reference
     pub fn default_path(&self) -> &'static str {
         match self {
@@ -111,6 +124,17 @@ impl Reference {
             Reference::Hg38 => HG38_DEFAULT_PATH,
         }
     }
+}
+
+/// A variant position to be verified
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Variant {
+    /// Chromosome name (e.g., "chr1" or "1")
+    pub chrom: String,
+    /// 1-based position
+    pub pos: u64,
+    /// Reference allele
+    pub ref_base: String,
 }
 
 /// Result of verifying a VCF against both references
@@ -240,6 +264,42 @@ pub fn detect_build(vcf_path: impl Into<String>) -> Result<BuildResult, VerifyEr
     })
 }
 
+/// Detect build from a list of positions (e.g. from DTC records)
+///
+/// This skips VCF parsing and works with arbitrary data.
+pub fn detect_build_from_positions(positions: &[Variant]) -> Result<BuildResult, VerifyError> {
+    let r = Verifier::from_variants(positions.to_vec())
+        .silent()
+        .verify_both()?;
+    Ok(BuildResult {
+        hg19_match_rate: r.match_rate(Reference::Hg19),
+        hg38_match_rate: r.match_rate(Reference::Hg38),
+        hg19_lines: r.hg19_lines,
+        hg38_lines: r.hg38_lines,
+        hg19_mismatches: r.hg19_mismatches,
+        hg38_mismatches: r.hg38_mismatches,
+    })
+}
+
+/// Helper to detect if a VCF/variant set matches a specific reference path
+///
+/// Returns the match rate (0.0 to 100.0) against the provided reference.
+pub fn detect_build_with_ref(vcf_path: impl Into<String>, ref_path: impl Into<String>) -> Result<f64, VerifyError> {
+    let ref_path = ref_path.into();
+    // Dummy reference enum for verify_single, but we override path
+    let r = Verifier::new(vcf_path)
+        .hg19_path(&ref_path) // Override hg19 path
+        .silent()
+        .no_download() // Don't download
+        .verify_single(Reference::Hg19)?; // Check "Hg19" which now points to ref_path
+
+    let (lines, mismatches) = r;
+    if lines == 0 {
+        return Ok(0.0);
+    }
+    Ok(((lines - mismatches) as f64 / lines as f64) * 100.0)
+}
+
 /// Error type for verification operations
 #[derive(Debug)]
 pub enum VerifyError {
@@ -251,6 +311,8 @@ pub enum VerifyError {
     Io(std::io::Error),
     /// Network/download error
     Download(String),
+    /// Checksum mismatch
+    ChecksumMismatch(String),
 }
 
 impl std::fmt::Display for VerifyError {
@@ -260,6 +322,7 @@ impl std::fmt::Display for VerifyError {
             VerifyError::ReferenceNotFound(path) => write!(f, "Reference not found: {}", path),
             VerifyError::Io(e) => write!(f, "I/O error: {}", e),
             VerifyError::Download(msg) => write!(f, "Download failed: {}", msg),
+            VerifyError::ChecksumMismatch(msg) => write!(f, "Checksum mismatch: {}", msg),
         }
     }
 }
@@ -290,9 +353,12 @@ impl From<std::io::Error> for VerifyError {
 /// ```
 #[derive(Debug, Clone)]
 pub struct Verifier {
-    vcf_path: String,
+    vcf_path: Option<String>,
+    variants: Option<Vec<Variant>>,
     hg19_path: String,
     hg38_path: String,
+    hg19_md5: Option<String>,
+    hg38_md5: Option<String>,
     show_progress: bool,
     verbose: bool,
     auto_download: bool,
@@ -301,25 +367,57 @@ pub struct Verifier {
 impl Verifier {
     /// Create a new verifier for the given VCF file
     pub fn new(vcf_path: impl Into<String>) -> Self {
+        let (hg19, hg38) = Self::default_paths();
         Verifier {
-            vcf_path: vcf_path.into(),
-            hg19_path: HG19_DEFAULT_PATH.to_string(),
-            hg38_path: HG38_DEFAULT_PATH.to_string(),
+            vcf_path: Some(vcf_path.into()),
+            variants: None,
+            hg19_path: hg19,
+            hg38_path: hg38,
+            hg19_md5: Some(Reference::Hg19.md5().to_string()),
+            hg38_md5: Some(Reference::Hg38.md5().to_string()),
             show_progress: true,
             verbose: true,
             auto_download: true,
         }
     }
 
+    /// Create a new verifier for a list of variants
+    pub fn from_variants(variants: Vec<Variant>) -> Self {
+        let (hg19, hg38) = Self::default_paths();
+        Verifier {
+            vcf_path: None,
+            variants: Some(variants),
+            hg19_path: hg19,
+            hg38_path: hg38,
+            hg19_md5: Some(Reference::Hg19.md5().to_string()),
+            hg38_md5: Some(Reference::Hg38.md5().to_string()),
+            show_progress: true,
+            verbose: true,
+            auto_download: true,
+        }
+    }
+
+    fn default_paths() -> (String, String) {
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::env::current_dir().unwrap())
+            .join("check_build");
+
+        let hg19 = cache_dir.join(HG19_DEFAULT_PATH).to_string_lossy().into_owned();
+        let hg38 = cache_dir.join(HG38_DEFAULT_PATH).to_string_lossy().into_owned();
+        (hg19, hg38)
+    }
+
     /// Set custom path for hg19 reference
     pub fn hg19_path(mut self, path: impl Into<String>) -> Self {
         self.hg19_path = path.into();
+        self.hg19_md5 = None; // Disable checksum check for custom path
         self
     }
 
     /// Set custom path for hg38 reference
     pub fn hg38_path(mut self, path: impl Into<String>) -> Self {
         self.hg38_path = path.into();
+        self.hg38_md5 = None; // Disable checksum check for custom path
         self
     }
 
@@ -343,11 +441,18 @@ impl Verifier {
 
     /// Verify against both hg19 and hg38 in parallel
     pub fn verify_both(&self) -> Result<VerificationResult, VerifyError> {
-        self.validate_vcf()?;
+        self.validate_input()?;
         self.ensure_references()?;
 
         let split_dir = tempfile::tempdir()?;
-        let contig_file_map = split_vcf_by_contig(&self.vcf_path, &split_dir)?;
+        let contig_file_map = if let Some(ref path) = self.vcf_path {
+            split_vcf_by_contig(path, &split_dir)?
+        } else if let Some(ref variants) = self.variants {
+            split_variants_by_contig(variants.iter().cloned(), &split_dir)?
+        } else {
+            return Err(VerifyError::InvalidVcf("No input provided".to_string()));
+        };
+
         let contig_file_map = Arc::new(contig_file_map);
 
         let configs = [
@@ -389,21 +494,27 @@ impl Verifier {
     ///
     /// Returns `(lines_checked, mismatches)`
     pub fn verify_single(&self, reference: Reference) -> Result<(u64, u64), VerifyError> {
-        self.validate_vcf()?;
+        self.validate_input()?;
 
-        let ref_path = match reference {
-            Reference::Hg19 => &self.hg19_path,
-            Reference::Hg38 => &self.hg38_path,
+        let (ref_path, md5) = match reference {
+            Reference::Hg19 => (&self.hg19_path, self.hg19_md5.as_deref()),
+            Reference::Hg38 => (&self.hg38_path, self.hg38_md5.as_deref()),
         };
 
         if self.auto_download {
-            ensure_reference(ref_path, reference.url(), self.show_progress)?;
+            ensure_reference(ref_path, reference.url(), md5, self.show_progress)?;
         } else if !Path::new(ref_path).exists() {
             return Err(VerifyError::ReferenceNotFound(ref_path.clone()));
         }
 
         let split_dir = tempfile::tempdir()?;
-        let contig_file_map = split_vcf_by_contig(&self.vcf_path, &split_dir)?;
+        let contig_file_map = if let Some(ref path) = self.vcf_path {
+            split_vcf_by_contig(path, &split_dir)?
+        } else if let Some(ref variants) = self.variants {
+            split_variants_by_contig(variants.iter().cloned(), &split_dir)?
+        } else {
+            return Err(VerifyError::InvalidVcf("No input provided".to_string()));
+        };
 
         Ok(verify_reference_streaming(
             ref_path,
@@ -413,25 +524,31 @@ impl Verifier {
         ))
     }
 
-    fn validate_vcf(&self) -> Result<(), VerifyError> {
-        if !self.vcf_path.ends_with(".vcf") {
-            return Err(VerifyError::InvalidVcf(
-                "File must have .vcf extension (not .gz)".to_string(),
+    fn validate_input(&self) -> Result<(), VerifyError> {
+        if let Some(ref path) = self.vcf_path {
+            if !path.ends_with(".vcf") {
+                return Err(VerifyError::InvalidVcf(
+                    "File must have .vcf extension (not .gz)".to_string(),
+                ));
+            }
+            if !Path::new(path).exists() {
+                return Err(VerifyError::InvalidVcf(format!(
+                    "File not found: {}",
+                    path
+                )));
+            }
+        } else if self.variants.is_none() {
+             return Err(VerifyError::InvalidVcf(
+                "No VCF path or variants provided".to_string(),
             ));
-        }
-        if !Path::new(&self.vcf_path).exists() {
-            return Err(VerifyError::InvalidVcf(format!(
-                "File not found: {}",
-                self.vcf_path
-            )));
         }
         Ok(())
     }
 
     fn ensure_references(&self) -> Result<(), VerifyError> {
         if self.auto_download {
-            ensure_reference(&self.hg19_path, HG19_URL, self.show_progress)?;
-            ensure_reference(&self.hg38_path, HG38_URL, self.show_progress)?;
+            ensure_reference(&self.hg19_path, HG19_URL, self.hg19_md5.as_deref(), self.show_progress)?;
+            ensure_reference(&self.hg38_path, HG38_URL, self.hg38_md5.as_deref(), self.show_progress)?;
         } else {
             if !Path::new(&self.hg19_path).exists() {
                 return Err(VerifyError::ReferenceNotFound(self.hg19_path.clone()));
@@ -449,21 +566,53 @@ impl Verifier {
 // ============================================================================
 
 /// Ensure a reference file exists, downloading if necessary
-pub fn ensure_reference(path: &str, url: &str, show_progress: bool) -> Result<(), VerifyError> {
+pub fn ensure_reference(path: &str, url: &str, expected_md5: Option<&str>, show_progress: bool) -> Result<(), VerifyError> {
+    if let Some(parent) = Path::new(path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
     if Path::new(path).exists() {
-        return Ok(());
+        if let Some(md5) = expected_md5 {
+            if check_md5(path, md5)? {
+                return Ok(());
+            } else if show_progress {
+                eprintln!("Checksum mismatch for {}, redownloading...", path);
+            }
+        } else {
+            return Ok(());
+        }
     }
 
     download_file(url, path, show_progress)?;
 
-    // Check for gzip and decompress
-    let mut file = File::open(path)?;
-    let mut buffer = [0; 2];
-    if file.read_exact(&mut buffer).is_ok() && buffer == [0x1f, 0x8b] {
-        decompress_gzip_in_place(path)?;
+    if let Some(md5) = expected_md5 {
+        if !check_md5(path, md5)? {
+            return Err(VerifyError::ChecksumMismatch(format!(
+                "Downloaded file {} does not match expected MD5 {}",
+                path, md5
+            )));
+        }
     }
 
     Ok(())
+}
+
+fn check_md5(path: &str, expected: &str) -> Result<bool, VerifyError> {
+    let mut file = File::open(path)?;
+    let mut hasher = md5::Context::new();
+    let mut buffer = [0; 8192];
+
+    loop {
+        let count = file.read(&mut buffer).map_err(VerifyError::Io)?;
+        if count == 0 {
+            break;
+        }
+        hasher.consume(&buffer[..count]);
+    }
+
+    let result = hasher.finalize();
+    let result_str = format!("{:x}", result);
+    Ok(result_str == expected)
 }
 
 /// Generate contig name candidates for flexible matching
@@ -551,22 +700,6 @@ fn download_file(url: &str, dest_path: &str, show_progress: bool) -> Result<(), 
     Ok(())
 }
 
-fn decompress_gzip_in_place(path: &str) -> Result<(), VerifyError> {
-    let compressed = std::fs::read(path)?;
-    let mut decoder = GzDecoder::new(&compressed[..]);
-    let mut decompressed = Vec::new();
-    decoder
-        .read_to_end(&mut decompressed)
-        .map_err(VerifyError::Io)?;
-
-    let file = File::create(path)?;
-    let mut writer = BufWriter::with_capacity(DOWNLOAD_BUFFER_SIZE, file);
-    writer.write_all(&decompressed)?;
-    writer.flush()?;
-
-    Ok(())
-}
-
 /// Split VCF by contig into temporary files
 pub fn split_vcf_by_contig(
     vcf_path: &str,
@@ -575,31 +708,40 @@ pub fn split_vcf_by_contig(
     let f = File::open(vcf_path)?;
     let reader = BufReader::with_capacity(FASTA_READ_BUFFER_SIZE, f);
 
-    let mut handles: HashMap<String, BufWriter<File>> = HashMap::new();
-    let mut file_paths: HashMap<String, PathBuf> = HashMap::new();
-
-    for line_res in reader.lines() {
-        let line = line_res?;
+    let iter = reader.lines().filter_map(|l| l.ok()).filter_map(|line| {
         if line.starts_with('#') || line.trim().is_empty() {
-            continue;
+            return None;
         }
 
         let mut parts = line.split('\t');
-        let contig = match parts.next() {
-            Some(c) if !c.is_empty() => c,
-            _ => continue,
-        };
+        let contig = parts.next()?;
+        if contig.is_empty() { return None; }
 
-        // Validate: need POS and REF columns
-        let pos = parts.next();
+        let pos_str = parts.next()?;
         let _id = parts.next();
-        let ref_allele = parts.next();
+        let ref_base = parts.next()?;
 
-        if pos.is_none() || ref_allele.is_none() || pos.unwrap().parse::<u64>().is_err() {
-            continue;
-        }
+        let pos = pos_str.parse::<u64>().ok()?;
 
-        let contig_owned = contig.to_string();
+        Some(Variant {
+            chrom: contig.to_string(),
+            pos,
+            ref_base: ref_base.to_string(),
+        })
+    });
+
+    split_variants_by_contig(iter, split_dir)
+}
+
+fn split_variants_by_contig(
+    variants: impl Iterator<Item = Variant>,
+    split_dir: &TempDir,
+) -> Result<HashMap<String, PathBuf>, VerifyError> {
+    let mut handles: HashMap<String, BufWriter<File>> = HashMap::new();
+    let mut file_paths: HashMap<String, PathBuf> = HashMap::new();
+
+    for v in variants {
+        let contig_owned = v.chrom;
 
         if !handles.contains_key(&contig_owned) {
             let contig_file = split_dir.path().join(format!("{}.tmp", contig_owned));
@@ -612,7 +754,9 @@ pub fn split_vcf_by_contig(
         }
 
         if let Some(h) = handles.get_mut(&contig_owned) {
-            writeln!(h, "{}", line)?;
+            // Write in a format compatible with verify_contig: CHROM POS ID REF
+            // We use "." for ID.
+            writeln!(h, "{}\t{}\t.\t{}", contig_owned, v.pos, v.ref_base)?;
         }
     }
 
@@ -685,11 +829,26 @@ fn verify_reference_streaming(
         None
     };
 
-    let f = match File::open(fasta_path) {
-        Ok(x) => x,
+    let mut reader: Box<dyn BufRead> = match File::open(fasta_path) {
+        Ok(mut f) => {
+            // Check magic bytes to detect gzip even if extension doesn't match
+            let mut magic = [0u8; 2];
+            let is_gzip = if f.read_exact(&mut magic).is_ok() {
+                magic == [0x1f, 0x8b]
+            } else {
+                false
+            };
+            // Seek back to start
+            let _ = f.seek(std::io::SeekFrom::Start(0));
+
+            if is_gzip {
+                Box::new(BufReader::with_capacity(FASTA_READ_BUFFER_SIZE, GzDecoder::new(f)))
+            } else {
+                Box::new(BufReader::with_capacity(FASTA_READ_BUFFER_SIZE, f))
+            }
+        },
         Err(_) => return (0, 0),
     };
-    let mut reader = BufReader::with_capacity(FASTA_READ_BUFFER_SIZE, f);
 
     let mut chunk = vec![0u8; FASTA_READ_BUFFER_SIZE];
     let mut read_bytes = 0u64;
