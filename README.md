@@ -1,6 +1,6 @@
 # check_build
 
-A fast, memory-efficient tool to verify VCF files against hg19 and hg38 reference genomes.
+A fast, memory-efficient tool to verify VCF files against hg19 and hg38 reference genomes. Also available as a library for general-purpose use beyond VCF.
 
 ## Quick Start
 
