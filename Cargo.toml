@@ -6,7 +6,7 @@ edition = "2024"
 rust-version = "1.85"
 description = "A tool to verify a VCF file against hg19 and hg38 references using a streaming, low-memory approach."
 license = "MIT"
-repository = "https://github.com/SauersML/check_build"
+repository = "https://docs.rs/crate/check_build/latest"
 
 [lib]
 name = "check_build"
