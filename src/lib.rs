@@ -281,6 +281,47 @@ pub fn detect_build_from_positions(positions: &[Variant]) -> Result<BuildResult,
     })
 }
 
+/// Detect build from positions using externally-managed reference files
+///
+/// This variant accepts custom paths to avoid re-downloading references.
+/// If paths are provided, MD5 validation and auto-download are skipped.
+///
+/// # Example
+/// ```rust,no_run
+/// use check_build::{Variant, detect_build_from_positions_with_refs};
+///
+/// let variants = vec![
+///     Variant { chrom: "1".into(), pos: 12345, ref_base: "A".into() },
+/// ];
+///
+/// let result = detect_build_from_positions_with_refs(
+///     &variants,
+///     Some("/cache/hg19.fa"),
+///     Some("/cache/hg38.fa"),
+/// ).unwrap();
+/// ```
+pub fn detect_build_from_positions_with_refs(
+    positions: &[Variant],
+    hg19_path: Option<impl Into<String>>,
+    hg38_path: Option<impl Into<String>>,
+) -> Result<BuildResult, VerifyError> {
+    let mut verifier = Verifier::from_variants(positions.to_vec()).silent();
+
+    if let (Some(h19), Some(h38)) = (hg19_path, hg38_path) {
+        verifier = verifier.with_reference_paths(h19, h38);
+    }
+
+    let r = verifier.verify_both()?;
+    Ok(BuildResult {
+        hg19_match_rate: r.match_rate(Reference::Hg19),
+        hg38_match_rate: r.match_rate(Reference::Hg38),
+        hg19_lines: r.hg19_lines,
+        hg38_lines: r.hg38_lines,
+        hg19_mismatches: r.hg19_mismatches,
+        hg38_mismatches: r.hg38_mismatches,
+    })
+}
+
 /// Helper to detect if a VCF/variant set matches a specific reference path
 ///
 /// Returns the match rate (0.0 to 100.0) against the provided reference.
@@ -445,6 +486,37 @@ impl Verifier {
     /// Disable automatic download of missing references
     pub fn no_download(mut self) -> Self {
         self.auto_download = false;
+        self
+    }
+
+    /// Provide both reference paths and skip MD5 validation/downloading
+    ///
+    /// This is the preferred method when integrating check_build as a library
+    /// and you've already cached the references elsewhere. It:
+    /// - Sets custom paths for both hg19 and hg38
+    /// - Disables MD5 checksum validation
+    /// - Disables automatic downloading
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use check_build::Verifier;
+    ///
+    /// let result = Verifier::from_variants(variants)
+    ///     .with_reference_paths("/cache/hg19.fa", "/cache/hg38.fa")
+    ///     .silent()
+    ///     .verify_both()
+    ///     .unwrap();
+    /// ```
+    pub fn with_reference_paths(
+        mut self,
+        hg19_path: impl Into<String>,
+        hg38_path: impl Into<String>,
+    ) -> Self {
+        self.hg19_path = hg19_path.into();
+        self.hg38_path = hg38_path.into();
+        self.hg19_md5 = None; // Skip MD5 validation for externally-managed references
+        self.hg38_md5 = None;
+        self.auto_download = false; // Trust caller's paths exist
         self
     }
 
