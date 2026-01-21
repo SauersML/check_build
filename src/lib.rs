@@ -499,7 +499,11 @@ impl Verifier {
     ///
     /// # Example
     /// ```rust,no_run
-    /// use check_build::Verifier;
+    /// use check_build::{Verifier, Variant};
+    ///
+    /// let variants = vec![
+    ///     Variant { chrom: "1".into(), pos: 12345, ref_base: "A".into() },
+    /// ];
     ///
     /// let result = Verifier::from_variants(variants)
     ///     .with_reference_paths("/cache/hg19.fa", "/cache/hg38.fa")
