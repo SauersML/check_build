@@ -296,20 +296,18 @@ pub fn detect_build_from_positions(positions: &[Variant]) -> Result<BuildResult,
 ///
 /// let result = detect_build_from_positions_with_refs(
 ///     &variants,
-///     Some("/cache/hg19.fa"),
-///     Some("/cache/hg38.fa"),
+///     "/cache/hg19.fa",
+///     "/cache/hg38.fa",
 /// ).unwrap();
 /// ```
 pub fn detect_build_from_positions_with_refs(
     positions: &[Variant],
-    hg19_path: Option<impl Into<String>>,
-    hg38_path: Option<impl Into<String>>,
+    hg19_path: impl Into<String>,
+    hg38_path: impl Into<String>,
 ) -> Result<BuildResult, VerifyError> {
-    let mut verifier = Verifier::from_variants(positions.to_vec()).silent();
-
-    if let (Some(h19), Some(h38)) = (hg19_path, hg38_path) {
-        verifier = verifier.with_reference_paths(h19, h38);
-    }
+    let verifier = Verifier::from_variants(positions.to_vec())
+        .silent()
+        .with_reference_paths(hg19_path, hg38_path);
 
     let r = verifier.verify_both()?;
     Ok(BuildResult {
