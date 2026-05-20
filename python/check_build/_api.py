@@ -259,33 +259,45 @@ class Verifier:
 
     # Builder methods return *new* instances so users can branch off of a
     # partially-configured Verifier without surprising mutation.
+    #
+    # We avoid the typical `dataclasses.replace` route because we want a
+    # bypass-the-__init__ copy (Verifier.__init__ does file-existence
+    # checks). Building each clone field-by-field via __new__ + the
+    # explicit copy of every slot keeps the builder both fast and
+    # legible — and means adding a new slot requires updating exactly one
+    # place (here) instead of touching every `with_*`.
 
-    def _replace(self, **kwargs) -> "Verifier":
+    def _clone(self, **overrides) -> "Verifier":
         new = Verifier.__new__(Verifier)
-        for slot in self.__slots__:
-            object.__setattr__(new, slot, kwargs.get(slot[1:], getattr(self, slot)))
+        new._vcf_path = overrides.get("vcf_path", self._vcf_path)
+        new._binary = overrides.get("binary", self._binary)
+        new._quiet = overrides.get("quiet", self._quiet)
+        new._summary_only = overrides.get("summary_only", self._summary_only)
+        new._hg19_path = overrides.get("hg19_path", self._hg19_path)
+        new._hg38_path = overrides.get("hg38_path", self._hg38_path)
+        new._timeout = overrides.get("timeout", self._timeout)
         return new
 
     def quiet(self, value: bool = True) -> "Verifier":
-        return self._replace(quiet=value)
+        return self._clone(quiet=value)
 
     def summary_only(self, value: bool = True) -> "Verifier":
-        return self._replace(summary_only=value)
+        return self._clone(summary_only=value)
 
     def with_reference_paths(self, hg19: PathLike, hg38: PathLike) -> "Verifier":
-        return self._replace(hg19_path=Path(hg19), hg38_path=Path(hg38))
+        return self._clone(hg19_path=Path(hg19), hg38_path=Path(hg38))
 
     def with_hg19_path(self, path: PathLike) -> "Verifier":
-        return self._replace(hg19_path=Path(path))
+        return self._clone(hg19_path=Path(path))
 
     def with_hg38_path(self, path: PathLike) -> "Verifier":
-        return self._replace(hg38_path=Path(path))
+        return self._clone(hg38_path=Path(path))
 
     def with_binary(self, path: PathLike) -> "Verifier":
-        return self._replace(binary=Path(path))
+        return self._clone(binary=Path(path))
 
     def with_timeout(self, seconds: Optional[float]) -> "Verifier":
-        return self._replace(timeout=seconds)
+        return self._clone(timeout=seconds)
 
     # --- Execution ---------------------------------------------------------
 
