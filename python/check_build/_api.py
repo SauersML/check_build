@@ -49,7 +49,7 @@ class CheckBuildBinaryNotFound(CheckBuildError, FileNotFoundError):
 
         cargo install check_build
 
-    Or set the ``CHECK_BUILD_BIN`` env var (or pass ``binary=`` explicitly).
+    …or pass ``binary=`` explicitly to point at a custom build.
     """
 
 
@@ -180,26 +180,22 @@ def locate_binary(override: Optional[PathLike] = None) -> Path:
 
     Resolution order:
       1. ``override`` argument, if given.
-      2. ``CHECK_BUILD_BIN`` environment variable.
-      3. ``check_build`` on ``PATH``.
+      2. ``check_build`` on ``PATH``.
+
+    No environment-variable indirection — pass ``binary=`` explicitly
+    when you want to use a non-PATH copy.
     """
     if override is not None:
         p = Path(override)
         if not p.exists():
             raise CheckBuildBinaryNotFound(f"check_build binary not found at {p}")
         return p
-    env = os.environ.get("CHECK_BUILD_BIN")
-    if env:
-        p = Path(env)
-        if not p.exists():
-            raise CheckBuildBinaryNotFound(f"$CHECK_BUILD_BIN points to nonexistent {p}")
-        return p
     which = shutil.which("check_build")
     if which:
         return Path(which)
     raise CheckBuildBinaryNotFound(
         "Could not locate `check_build`. Install it with `cargo install check_build`, "
-        "or set CHECK_BUILD_BIN, or pass binary=... to the Verifier."
+        "or pass binary=... to the Verifier."
     )
 
 

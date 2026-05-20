@@ -75,21 +75,13 @@ def test_locate_binary_explicit(tmp_path):
     assert locate_binary(fake) == fake
 
 
-def test_locate_binary_env(tmp_path, monkeypatch):
-    fake = _make_fake(tmp_path, "print('hi')")
-    monkeypatch.setenv("CHECK_BUILD_BIN", str(fake))
-    assert locate_binary() == fake
-
-
-def test_locate_binary_missing(monkeypatch, tmp_path):
-    monkeypatch.delenv("CHECK_BUILD_BIN", raising=False)
-    monkeypatch.setenv("PATH", str(tmp_path))  # empty
+def test_locate_binary_override_missing_raises(tmp_path):
     with pytest.raises(CheckBuildBinaryNotFound):
-        locate_binary()
+        locate_binary(tmp_path / "no-such-binary")
 
 
-def test_locate_binary_env_pointing_nowhere(monkeypatch, tmp_path):
-    monkeypatch.setenv("CHECK_BUILD_BIN", str(tmp_path / "nope"))
+def test_locate_binary_not_on_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", str(tmp_path))  # empty PATH
     with pytest.raises(CheckBuildBinaryNotFound):
         locate_binary()
 
@@ -287,8 +279,8 @@ def test_verifier_replace_does_not_mutate(tmp_path):
     vcf = _make_vcf(tmp_path)
     base = Verifier(vcf, binary=fake, quiet=False)
     new = base.quiet()
-    assert base._quiet is False  # noqa: SLF001 (test introspection)
-    assert new._quiet is True  # noqa: SLF001
+    assert base._quiet is False
+    assert new._quiet is True
     assert new is not base
 
 

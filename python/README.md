@@ -29,11 +29,11 @@ cargo install check_build
 
 The wrapper finds the binary in this order:
 1. `binary=` keyword argument (explicit path).
-2. `$CHECK_BUILD_BIN` env var.
-3. `check_build` on `PATH`.
+2. `check_build` on `PATH`.
 
-If none resolve, you get `CheckBuildBinaryNotFound` with the suggested
-`cargo install` command.
+No environment-variable indirection — pass `binary=` explicitly when
+the binary isn't on `PATH`. If neither resolves you get
+`CheckBuildBinaryNotFound` with the suggested `cargo install` command.
 
 ## Top-level helpers
 
