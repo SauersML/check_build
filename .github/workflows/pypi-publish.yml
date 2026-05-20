@@ -1,0 +1,100 @@
+name: Publish to PyPI
+
+# Modeled after gam's pypi-wheels.yml, simplified for a pure-Python
+# package: no maturin, no per-OS matrix, just one sdist + one universal
+# wheel built with `python -m build`, then `twine upload --skip-existing`.
+#
+# Triggers:
+#   * push to main           — publishes if pyproject.toml carries a new
+#                              version; twine no-ops otherwise.
+#   * push of a v* tag       — normal release path.
+#   * workflow_dispatch      — on-demand republish.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'python/**'
+      - '.github/workflows/pypi-publish.yml'
+    tags: ['v*']
+  workflow_dispatch: {}
+
+concurrency:
+  group: pypi-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install build backend
+        run: python -m pip install --upgrade build
+      - name: Build sdist + wheel
+        working-directory: python
+        run: python -m build --sdist --wheel --outdir dist
+      - name: Show artifacts
+        run: ls -la python/dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pypi-artifacts
+          path: python/dist/*
+          if-no-files-found: error
+
+  smoke-install:
+    # Build a fresh venv on a clean runner, install the wheel that was just
+    # built, and import the package. Catches obvious packaging regressions
+    # (missing __init__.py, broken dependency pins) before they ship.
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: actions/download-artifact@v4
+        with:
+          name: pypi-artifacts
+          path: dist
+      - name: Install wheel and import
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install dist/*.whl
+          python -c "import check_build; print(check_build.__version__)"
+
+  release:
+    name: Upload to PyPI
+    needs: [build, smoke-install]
+    # See gam/.github/workflows/pypi-wheels.yml for the rationale behind
+    # publishing on every push-to-main with --skip-existing.
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      needs.smoke-install.result == 'success' &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-24.04
+    environment: pypi
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - uses: actions/download-artifact@v4
+        with:
+          name: pypi-artifacts
+          path: dist
+      - name: Show what will be uploaded
+        run: ls -la dist
+      - name: Upload to PyPI via twine
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine upload --skip-existing --non-interactive dist/*

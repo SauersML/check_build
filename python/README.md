@@ -37,6 +37,26 @@ result.hg19_mismatches         # int
 result.match_rate(Reference.HG19)
 ```
 
+## Shortcuts: avoid downloads
+
+`check_build` will download hg19 / hg38 references to a cache directory
+on first run. If you already have them, point at them directly — the
+wrapper passes the paths straight through and the binary skips both the
+download and the MD5 check:
+
+```python
+from check_build import detect_build
+
+detect_build(
+    "sample.vcf",
+    hg19_path="/cache/hg19.fa",   # avoid download
+    hg38_path="/cache/hg38.fa",
+)
+```
+
+`Verifier` exposes the same controls via `with_reference_paths`,
+`with_hg19_path`, and `with_hg38_path`.
+
 ## Builder
 
 ```python
