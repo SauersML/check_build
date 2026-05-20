@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "check_build"
+version = "0.1.0"
+description = "Python wrapper for the SauersML/check_build VCF reference build verifier."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "SauersML" }]
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["genomics", "bioinformatics", "vcf", "hg19", "hg38", "genome-build"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+[project.urls]
+Homepage = "https://github.com/SauersML/check_build"
+Issues = "https://github.com/SauersML/check_build/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["check_build"]
